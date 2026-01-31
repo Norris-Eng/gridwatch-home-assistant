@@ -1,6 +1,8 @@
 # GridWatch: Real-Time Grid Pricing & Health Monitor
 **Turn your "Dumb" Home into a Smart Grid Asset.**
 
+[Live Dashboard](https://gridwatch.live/)
+
 This repository contains integrations for **Home Assistant** (Smart Home), **Proxmox** (Homelab), and legacy support for **Industrial Mining**.
 
 ---

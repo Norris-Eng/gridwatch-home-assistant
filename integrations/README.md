@@ -6,6 +6,8 @@
 
 A robust, autonomous grid logic controller for **Homelabs (Proxmox), Bitcoin Mining, and High-Performance Computing.**
 
+[Live Dashboard](https://gridwatch.live/)
+
 This client interfaces with the **GridWatch API** to monitor real-time power grid conditions (LMP Settlements, Stress Index) across US ISOs (ERCOT, PJM, SPP, NYISO, MISO, CAISO and ISONE). It automatically curtails power during volatility and crucially **safely restores power** when conditions normalize. [Get API Key Here](https://rapidapi.com/cnorris1316/api/gridwatch-us-telemetry)
 
 ## What's New in v1.1: "Smart Resume"
@@ -17,7 +19,7 @@ This client interfaces with the **GridWatch API** to monitor real-time power gri
 
 ## Features
 * **Ultra-Low Latency:** Polls 5-minute settlement intervals with <50ms API response time.
-* **Multi-ISO Support:** Native support for ERCOT, PJM, NYISO, MISO, SPP and ISO-NE.
+* **Multi-ISO Support:** Native support for ERCOT, PJM, NYISO, MISO, SPP, CAISO and ISONE.
 * **Agnostic Integration:**
     * **Foreman / HiveOS:** Native handlers for mining fleet management.
     * **Proxmox (AI/HPC):** Graceful shutdown (ACPI) signals to protect filesystem integrity during power events.
