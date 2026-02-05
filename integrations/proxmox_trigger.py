@@ -4,163 +4,146 @@ import datetime
 import urllib3
 from proxmoxer import ProxmoxAPI
 
-# Disable SSL warnings for self-signed Proxmox certs
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
+# ---------------------------------------------------------
+# GRIDWATCH v2.0 - PROXMOX INTEGRATION
+# ---------------------------------------------------------
+
 # --- CONFIGURATION ---
-# Get your key from: https://rapidapi.com/cnorris1316/api/gridwatch-us-telemetry
 RAPIDAPI_KEY = "YOUR_RAPIDAPI_KEY_HERE"
-REGION = "ERCOT" # Region Options: PJM, MISO, ERCOT, SPP, NYISO, ISONE, CAISO
+REGION = "ERCOT"
 
-# Safety Thresholds
-PRICE_CAP = 200        # Shut down if price > $200/MWh
-STRESS_CAP = 90        # Shut down if grid stress > 90%
-COOLDOWN_MINUTES = 15  # Minutes grid must be NORMAL before resuming
+# --- THRESHOLDS ---
+PRICE_CAP = 200.0
+DISPATCH_FLOOR = 0.0    # START VMs if Price <= $0 (Opportunity Compute)
+STRESS_CAP = 90.0
 
-# Simulation Mode (Set to False to actually execute shutdowns)
-SIMULATION_MODE = True
+# --- HYSTERESIS ---
+COOLDOWN_MINUTES = 15
 
 # --- PROXMOX CONFIGURATION ---
 PROXMOX_ENABLED = True
-PROXMOX_HOST = "192.168.1.X"      # IP address of your Proxmox Server
-PROXMOX_USER = "root@pam"         # User (usually root@pam)
+PROXMOX_HOST = "192.168.1.X"
+PROXMOX_USER = "root@pam"
 PROXMOX_PASSWORD = "YOUR_PASSWORD"
-PROXMOX_NODE = "pve"              # Name of your node (check your web UI)
-TARGET_VMS = [100, 101, 102]      # List of VM IDs to manage
+PROXMOX_NODE = "pve"
+TARGET_VMS = [100, 101, 102]
 
-# --- STATE TRACKING (DO NOT EDIT) ---
-CURRENTLY_CURTAILED = False
-LAST_NORMAL_TIME = None
+# --- STATE TRACKING ---
+CURRENT_STATE = "NORMAL"
+LAST_STATE_CHANGE = datetime.datetime.now()
+SIMULATION_MODE = True
 
-def get_proxmox_connection():
-    """Establishes a connection to the Proxmox API."""
+# ---------------------------------------------------------
+# PROXMOX ACTIONS
+# ---------------------------------------------------------
+def get_proxmox():
     try:
-        return ProxmoxAPI(
-            PROXMOX_HOST,
-            user=PROXMOX_USER,
-            password=PROXMOX_PASSWORD,
-            verify_ssl=False
-        )
-    except Exception as e:
-        print(f"   [ERROR] Could not connect to Proxmox: {e}")
-        return None
+        return ProxmoxAPI(PROXMOX_HOST, user=PROXMOX_USER, password=PROXMOX_PASSWORD, verify_ssl=False)
+    except: return None
 
-def curtail_workloads():
+def set_vm_state(target_state):
     """
-    Executes GRACEFUL SHUTDOWN for Proxmox VMs.
-    Protects filesystem integrity for AI/HPC workloads.
+    target_state: 'stopped' (Shutdown) or 'running' (Start)
     """
-    print(f"   [ACTION] 🛑 INITIATING GRACEFUL SHUTDOWN (SIGTERM)...")
+    if not PROXMOX_ENABLED: return
 
-    if PROXMOX_ENABLED:
-        proxmox = get_proxmox_connection()
-        if not proxmox: return
+    label = "SHUTDOWN" if target_state == 'stopped' else "STARTUP"
+    print(f"   [ACTION] PROXMOX {label} SEQUENCE...")
 
-        for vmid in TARGET_VMS:
-            try:
-                # 1. Check status first
-                status = proxmox.nodes(PROXMOX_NODE).qemu(vmid).status.current.get()
-                if status.get('status') == 'running':
-                    # 2. Send ACPI Shutdown (Soft Stop)
-                    proxmox.nodes(PROXMOX_NODE).qemu(vmid).status.shutdown.post()
-                    print(f"      -> VM {vmid}: Shutdown signal sent.")
-                else:
-                    print(f"      -> VM {vmid}: Already stopped.")
-            except Exception as e:
-                print(f"      -> VM {vmid} Error: {e}")
+    if SIMULATION_MODE:
+        print(f"      [SIMULATION] Proxmox VMs would be set to {target_state}.")
+        return
 
-def resume_workloads():
-    """
-    Boots up Proxmox VMs (AI/Compute Nodes).
-    """
-    print(f"   [ACTION] INITIATING COMPUTE STARTUP...")
+    proxmox = get_proxmox()
+    if not proxmox: return
 
-    if PROXMOX_ENABLED:
-        proxmox = get_proxmox_connection()
-        if not proxmox: return
+    for vmid in TARGET_VMS:
+        try:
+            current = proxmox.nodes(PROXMOX_NODE).qemu(vmid).status.current.get().get('status')
 
-        for vmid in TARGET_VMS:
-            try:
-                status = proxmox.nodes(PROXMOX_NODE).qemu(vmid).status.current.get()
-                if status.get('status') == 'stopped':
-                    proxmox.nodes(PROXMOX_NODE).qemu(vmid).status.start.post()
-                    print(f"      -> VM {vmid}: Start signal sent.")
-                else:
-                    print(f"      -> VM {vmid}: Already running.")
-            except Exception as e:
-                print(f"      -> VM {vmid} Error: {e}")
+            if target_state == 'stopped' and current == 'running':
+                proxmox.nodes(PROXMOX_NODE).qemu(vmid).status.shutdown.post()
+                print(f"      -> VM {vmid}: Shutdown signal sent.")
 
-def check_grid_status():
-    global CURRENTLY_CURTAILED, LAST_NORMAL_TIME
+            elif target_state == 'running' and current == 'stopped':
+                proxmox.nodes(PROXMOX_NODE).qemu(vmid).status.start.post()
+                print(f"      -> VM {vmid}: Start signal sent.")
+
+            else:
+                print(f"      -> VM {vmid}: Already {current}.")
+        except Exception as e:
+            print(f"      -> VM {vmid} Error: {e}")
+
+# ---------------------------------------------------------
+# LOGIC ENGINE
+# ---------------------------------------------------------
+def check_grid_logic():
+    global CURRENT_STATE, LAST_STATE_CHANGE
 
     url = "https://gridwatch-us-telemetry.p.rapidapi.com/api/curtailment"
     querystring = {"region": REGION, "price_cap": str(PRICE_CAP), "stress_cap": str(STRESS_CAP)}
     headers = {"X-RapidAPI-Key": RAPIDAPI_KEY, "X-RapidAPI-Host": "gridwatch-us-telemetry.p.rapidapi.com"}
 
     try:
-        print(f"Checking {REGION} grid status...", end="\r")
-        response = requests.get(url, headers=headers, params=querystring, timeout=10)
+        now_str = datetime.datetime.now().strftime("%H:%M:%S")
+        print(f"[{now_str}] Polling {REGION}...", end="\r")
 
-        if response.status_code != 200:
-            print(f"\n❌ API Error: {response.status_code} - {response.text}")
-            return
+        response = requests.get(url, headers=headers, params=querystring, timeout=10)
+        if response.status_code != 200: return
 
         data = response.json()
-        timestamp = datetime.datetime.now().strftime("%H:%M:%S")
+        price = data['metrics'].get('price_usd', 9999.0)
+        stress = data['metrics'].get('utilization_pct', 0)
+        if price is None: price = 9999.0
 
-        # --- LOGIC ENGINE ---
-        if data.get('curtail'):
-            # CASE 1: CRITICAL
-            if not CURRENTLY_CURTAILED:
-                print(f"\n[{timestamp}] 🔴 CURTAILMENT SIGNAL RECEIVED!")
-                print(f"   Reason: {data['trigger_reason']}")
-                print(f"   Price: ${data['metrics']['price_usd']}/MWh")
-
-                if not SIMULATION_MODE:
-                    curtail_workloads()
-                    CURRENTLY_CURTAILED = True
-                else:
-                    print("   [SIMULATION] Proxmox Shutdown would fire.")
-                    CURRENTLY_CURTAILED = True
-
-            LAST_NORMAL_TIME = None
-
-        else:
-            # CASE 2: NORMAL
-            if CURRENTLY_CURTAILED:
-                if LAST_NORMAL_TIME is None:
-                    print(f"\n[{timestamp}] 🟡 Grid Normal. Starting {COOLDOWN_MINUTES}m cooldown...")
-                    LAST_NORMAL_TIME = datetime.datetime.now()
-
-                elapsed = datetime.datetime.now() - LAST_NORMAL_TIME
-                remaining = (COOLDOWN_MINUTES * 60) - elapsed.total_seconds()
-
-                if remaining <= 0:
-                    print(f"\n[{timestamp}] 🟢 Cooldown Complete. Resuming Operations.")
-                    if not SIMULATION_MODE:
-                        resume_workloads()
-                        CURRENTLY_CURTAILED = False
-                        LAST_NORMAL_TIME = None
-                    else:
-                        print("   [SIMULATION] Proxmox Start command would fire.")
-                        CURRENTLY_CURTAILED = False
-                        LAST_NORMAL_TIME = None
-                else:
-                    print(f"\n[{timestamp}] 🟡 Waiting for cooldown ({int(remaining)}s)...")
+        # 1. CRITICAL (Shutdown)
+        if (price > PRICE_CAP) or (stress > STRESS_CAP):
+            if CURRENT_STATE != "CURTAILED":
+                print(f"\n[{now_str}] [CRITICAL] CRITICAL: Price ${price}")
+                set_vm_state('stopped')
+                CURRENT_STATE = "CURTAILED"
+                LAST_STATE_CHANGE = datetime.datetime.now()
             else:
-                print(f"\n[{timestamp}] 🟢 Grid Normal. Workloads Active.")
+                LAST_STATE_CHANGE = datetime.datetime.now()
 
-            print(f"   Price: ${data['metrics']['price_usd']}/MWh")
+        # 2. DISPATCH (Start Compute)
+        elif (price <= DISPATCH_FLOOR):
+            time_since = (datetime.datetime.now() - LAST_STATE_CHANGE).total_seconds()
+
+            if CURRENT_STATE == "CURTAILED" and time_since < (COOLDOWN_MINUTES * 60):
+                 print(f"\r[{now_str}] [WAITING] COOLDOWN... ({int((COOLDOWN_MINUTES*60)-time_since)}s)", end="")
+            elif CURRENT_STATE != "DISPATCHED":
+                print(f"\n[{now_str}] [DISPATCH] OPPORTUNITY: Price ${price} <= Floor")
+                set_vm_state('running')
+                CURRENT_STATE = "DISPATCHED"
+                LAST_STATE_CHANGE = datetime.datetime.now()
+
+        # 3. NORMAL (Recovery)
+        else:
+            time_since = (datetime.datetime.now() - LAST_STATE_CHANGE).total_seconds()
+            if CURRENT_STATE == "CURTAILED":
+                remaining = (COOLDOWN_MINUTES * 60) - time_since
+                if remaining <= 0:
+                    print(f"\n[{now_str}] [ OK ] RECOVERY. Resuming Workloads.")
+                    set_vm_state('running')
+                    CURRENT_STATE = "NORMAL"
+                    LAST_STATE_CHANGE = datetime.datetime.now()
+            elif CURRENT_STATE == "DISPATCHED":
+                 # If price rises above floor, you can either keep running (Normal)
+                 # or stop if you ONLY want to run when cheap.
+                 # Standard logic is to Keep running (Normal).
+                 if time_since > 300:
+                     print(f"\n[{now_str}] [ OK ] NORMALIZING.")
+                     CURRENT_STATE = "NORMAL"
+                     LAST_STATE_CHANGE = datetime.datetime.now()
 
     except Exception as e:
-        print(f"\nError connecting to GridWatch: {e}")
+        print(f"\n[EXCEPTION] {e}")
 
 if __name__ == "__main__":
-    print(f"--- GridWatch 'Proxmox Controller' Started ---")
-    print(f"Targeting Node: {PROXMOX_NODE} | VMs: {TARGET_VMS}")
-    print(f"Thresholds: Price > ${PRICE_CAP}")
-    print(f"Press Ctrl+C to stop.\n")
-
+    print(f"--- GridWatch v2.0 (Proxmox) ---")
     while True:
-        check_grid_status()
+        check_grid_logic()
         time.sleep(300)

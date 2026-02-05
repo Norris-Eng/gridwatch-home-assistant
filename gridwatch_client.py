@@ -3,133 +3,115 @@ import time
 import datetime
 import os
 
-# --- CONFIGURATION ---
-# Get your key from: https://rapidapi.com/cnorris1316/api/gridwatch-us-telemetry
-RAPIDAPI_KEY = "YOUR_RAPIDAPI_KEY_HERE"
+# ---------------------------------------------------------
+# GRIDWATCH v2.0 - GENERIC CLIENT
+# ---------------------------------------------------------
 
-# Region Options: PJM, MISO, ERCOT, SPP, NYISO, ISONE, CAISO
+# --- CONFIGURATION ---
+RAPIDAPI_KEY = "YOUR_RAPIDAPI_KEY_HERE"
 REGION = "ERCOT"
 
-# Safety Thresholds
-PRICE_CAP = 200        # Shut down if price > $200/MWh
-STRESS_CAP = 90        # Shut down if grid stress > 90%
+# --- THRESHOLDS ---
+PRICE_CAP = 200.0
+DISPATCH_FLOOR = 0.0
+STRESS_CAP = 90.0
 
-# Hysteresis / Safety Settings
-COOLDOWN_MINUTES = 15  # Minutes grid must be NORMAL before resuming
+# --- HYSTERESIS ---
+COOLDOWN_MINUTES = 15
 
-# Simulation Mode (Set to False to actually execute commands)
+# --- STATE TRACKING ---
+CURRENT_STATE = "NORMAL"
+LAST_STATE_CHANGE = datetime.datetime.now()
 SIMULATION_MODE = True
 
-# --- STATE TRACKING (DO NOT EDIT) ---
-# These variables track the "Live" state of your farm.
-# Modifying them manually will break the auto-resume logic.
-CURRENTLY_CURTAILED = False
-LAST_NORMAL_TIME = None
+# ---------------------------------------------------------
+# USER ACTIONS (EDIT THESE)
+# ---------------------------------------------------------
+def perform_action(action_type):
+    """
+    action_type: 'STOP', 'RESUME', 'DISPATCH'
+    """
+    prefix = "[SIMULATION]" if SIMULATION_MODE else "[ACTION]"
+    print(f"   {prefix} EXECUTING: {action_type}")
 
-def stop_mining_rigs():
-    """
-    Place your specific shutdown logic here.
-    Examples:
-    - Call a smart plug API (Tasmota/Kasa/Shelly)
-    - SSH into a management node
-    - Execute a local shell command
-    """
-    print("   [ACTION] 🛑 SENDING SHUTDOWN SIGNAL TO RIGS...")
+    if SIMULATION_MODE: return
 
-def resume_mining_rigs():
-    """
-    Place your specific resume/start logic here.
-    """
-    print("   [ACTION] SENDING RESUME SIGNAL TO RIGS...")
+    # --- YOUR CUSTOM LOGIC HERE ---
+    if action_type == "STOP":
+        # e.g., GPIO.output(18, GPIO.LOW)
+        pass
+    elif action_type == "RESUME":
+        # e.g., GPIO.output(18, GPIO.HIGH)
+        pass
+    elif action_type == "DISPATCH":
+        # e.g., Trigger high-load processes
+        pass
 
-def check_grid_status():
-    global CURRENTLY_CURTAILED, LAST_NORMAL_TIME
+# ---------------------------------------------------------
+# LOGIC ENGINE
+# ---------------------------------------------------------
+def check_grid_logic():
+    global CURRENT_STATE, LAST_STATE_CHANGE
 
     url = "https://gridwatch-us-telemetry.p.rapidapi.com/api/curtailment"
-
-    querystring = {
-        "region": REGION,
-        "price_cap": str(PRICE_CAP),
-        "stress_cap": str(STRESS_CAP)
-    }
-
-    headers = {
-        "X-RapidAPI-Key": RAPIDAPI_KEY,
-        "X-RapidAPI-Host": "gridwatch-us-telemetry.p.rapidapi.com"
-    }
+    querystring = {"region": REGION, "price_cap": str(PRICE_CAP), "stress_cap": str(STRESS_CAP)}
+    headers = {"X-RapidAPI-Key": RAPIDAPI_KEY, "X-RapidAPI-Host": "gridwatch-us-telemetry.p.rapidapi.com"}
 
     try:
-        print(f"Checking {REGION} grid status...", end="\r")
-        response = requests.get(url, headers=headers, params=querystring, timeout=10)
+        now_str = datetime.datetime.now().strftime("%H:%M:%S")
+        print(f"[{now_str}] Polling {REGION}...", end="\r")
 
-        if response.status_code != 200:
-            print(f"\n❌ API Error: {response.status_code} - {response.text}")
-            return
+        response = requests.get(url, headers=headers, params=querystring, timeout=10)
+        if response.status_code != 200: return
 
         data = response.json()
-        timestamp = datetime.datetime.now().strftime("%H:%M:%S")
+        price = data['metrics'].get('price_usd', 9999.0)
+        stress = data['metrics'].get('utilization_pct', 0)
+        if price is None: price = 9999.0
 
-        # --- LOGIC ENGINE ---
-        if data.get('curtail'):
-            # CASE 1: Grid is CRITICAL
-            if not CURRENTLY_CURTAILED:
-                print(f"\n[{timestamp}] 🔴 CURTAILMENT SIGNAL RECEIVED!")
-                print(f"   Reason: {data['trigger_reason']}")
-                print(f"   Price: ${data['metrics']['price_usd']}/MWh | Load: {data['metrics']['load_mw']} MW")
-
-                if not SIMULATION_MODE:
-                    stop_mining_rigs()
-                    CURRENTLY_CURTAILED = True
-                else:
-                    print("   [SIMULATION] Shutdown command sent.")
-                    CURRENTLY_CURTAILED = True
-
-            # Reset cooldown timer because grid is bad again
-            LAST_NORMAL_TIME = None
-
-        else:
-            # CASE 2: Grid is NORMAL
-            if CURRENTLY_CURTAILED:
-                # We are currently stopped, check if we can resume
-                if LAST_NORMAL_TIME is None:
-                    print(f"\n[{timestamp}] 🟡 Grid Normal. Starting {COOLDOWN_MINUTES}m cooldown timer...")
-                    LAST_NORMAL_TIME = datetime.datetime.now()
-
-                # Check how long it has been normal
-                elapsed = datetime.datetime.now() - LAST_NORMAL_TIME
-                remaining = (COOLDOWN_MINUTES * 60) - elapsed.total_seconds()
-
-                if remaining <= 0:
-                    print(f"\n[{timestamp}] 🟢 Cooldown Complete. Resuming Operations.")
-                    if not SIMULATION_MODE:
-                        resume_mining_rigs()
-                        CURRENTLY_CURTAILED = False
-                        LAST_NORMAL_TIME = None
-                    else:
-                        print("   [SIMULATION] Resume command sent.")
-                        CURRENTLY_CURTAILED = False
-                        LAST_NORMAL_TIME = None
-                else:
-                    # Still waiting
-                    print(f"\n[{timestamp}] 🟡 Grid Normal. Waiting {int(remaining/60)}m {int(remaining%60)}s for safety cooldown.")
-
+        # 1. CRITICAL
+        if (price > PRICE_CAP) or (stress > STRESS_CAP):
+            if CURRENT_STATE != "CURTAILED":
+                print(f"\n[{now_str}] [CRITICAL] CRITICAL: Price ${price}")
+                perform_action('STOP')
+                CURRENT_STATE = "CURTAILED"
+                LAST_STATE_CHANGE = datetime.datetime.now()
             else:
-                # Normal Operation (Already Running)
-                print(f"\n[{timestamp}] 🟢 Grid Normal. Operations Nominal.")
+                LAST_STATE_CHANGE = datetime.datetime.now()
 
-            print(f"   Price: ${data['metrics']['price_usd']}/MWh | Utilization: {data['metrics']['utilization_pct']}%")
+        # 2. DISPATCH
+        elif (price <= DISPATCH_FLOOR):
+            time_since = (datetime.datetime.now() - LAST_STATE_CHANGE).total_seconds()
+
+            if CURRENT_STATE == "CURTAILED" and time_since < (COOLDOWN_MINUTES * 60):
+                 print(f"\r[{now_str}] [WAITING] COOLDOWN... ({int((COOLDOWN_MINUTES*60)-time_since)}s)", end="")
+            elif CURRENT_STATE != "DISPATCHED":
+                print(f"\n[{now_str}] [DISPATCH] OPPORTUNITY: Price ${price}")
+                perform_action('DISPATCH')
+                CURRENT_STATE = "DISPATCHED"
+                LAST_STATE_CHANGE = datetime.datetime.now()
+
+        # 3. NORMAL
+        else:
+            time_since = (datetime.datetime.now() - LAST_STATE_CHANGE).total_seconds()
+            if CURRENT_STATE == "CURTAILED":
+                remaining = (COOLDOWN_MINUTES * 60) - time_since
+                if remaining <= 0:
+                    print(f"\n[{now_str}] [ OK ] RECOVERY. Resuming.")
+                    perform_action('RESUME')
+                    CURRENT_STATE = "NORMAL"
+                    LAST_STATE_CHANGE = datetime.datetime.now()
+            elif CURRENT_STATE == "DISPATCHED":
+                 if time_since > 300:
+                     print(f"\n[{now_str}] [ OK ] NORMALIZING.")
+                     CURRENT_STATE = "NORMAL"
+                     LAST_STATE_CHANGE = datetime.datetime.now()
 
     except Exception as e:
-        print(f"\nError connecting to GridWatch: {e}")
+        print(f"\n[EXCEPTION] {e}")
 
 if __name__ == "__main__":
-    print(f"--- GridWatch 'Kill Switch' Monitor Started ---")
-    print(f"Monitoring: {REGION}")
-    print(f"Thresholds: Price > ${PRICE_CAP} | Stress > {STRESS_CAP}%")
-    print(f"Cooldown: {COOLDOWN_MINUTES} Minutes")
-    print(f"Press Ctrl+C to stop.\n")
-
+    print(f"--- GridWatch v2.0 (Generic) ---")
     while True:
-        check_grid_status()
-        # Check every 5 minutes (300 seconds)
+        check_grid_logic()
         time.sleep(300)
