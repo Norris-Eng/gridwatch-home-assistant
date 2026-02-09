@@ -8,10 +8,8 @@ import sys
 # GRIDWATCH v2.1 - VISUAL DASHBOARD CLIENT
 # ---------------------------------------------------------
 
-# --- CONFIGURATION (ENV VARS > HARDCODED) ---
-# SECURITY BEST PRACTICE: Set these in your OS or .env file.
-# Fallback to empty string if not found (it will prompt you).
-RAPIDAPI_KEY = os.environ.get("GRIDWATCH_API_KEY", "YOUR_RAPIDAPI_KEY_HERE")
+# --- CONFIGURATION (ENV VARS) ---
+RAPIDAPI_KEY = os.environ.get("GRIDWATCH_API_KEY", "")
 REGION = os.environ.get("GRIDWATCH_REGION", "ERCOT")
 
 # THRESHOLDS
@@ -19,11 +17,19 @@ PRICE_CAP = float(os.environ.get("GW_PRICE_CAP", 200.0))
 STRESS_CAP = float(os.environ.get("GW_STRESS_CAP", 90.0))
 DISPATCH_FLOOR = float(os.environ.get("GW_DISPATCH_FLOOR", 0.0))
 
+# SETTINGS
+SIMULATION_MODE = os.environ.get("GW_SIMULATION_MODE", "False").lower() == "true"
+
 # INTERNAL STATE
 CURRENT_STATE = "NORMAL"
 LAST_STATE_CHANGE = datetime.datetime.now()
 COOLDOWN_MINUTES = 15
-ACTION_LOG = [] # Store last 5 actions for display
+ACTION_LOG = []
+
+def validate_config():
+    if not RAPIDAPI_KEY:
+        print("\n\033[91m[FATAL] Missing GRIDWATCH_API_KEY environment variable.\033[0m")
+        sys.exit(1)
 
 def clear_screen():
     os.system('cls' if os.name == 'nt' else 'clear')
@@ -39,16 +45,22 @@ def render_dashboard(price, stress, status_msg):
 
     # ANSI Colors
     C_RESET = "\033[0m"
-    C_RED = "\033[41m\033[37m"     # Red Background
-    C_GREEN = "\033[42m\033[30m"   # Green Background
-    C_YELLOW = "\033[43m\033[30m"  # Yellow Background
-    C_BLUE = "\033[44m\033[37m"    # Blue Background
+    C_RED = "\033[41m\033[37m"
+    C_GREEN = "\033[42m\033[30m"
+    C_YELLOW = "\033[43m\033[30m"
+    C_BLUE = "\033[44m\033[37m"
+    C_CYAN = "\033[46m\033[30m"
     C_BOLD = "\033[1m"
 
     # Header
     print(f"{C_BOLD}╔══════════════════════════════════════════════════════╗{C_RESET}")
     print(f"{C_BOLD}║           GRIDWATCH v2.1 // LIVE TELEMETRY           ║{C_RESET}")
     print(f"{C_BOLD}╚══════════════════════════════════════════════════════╝{C_RESET}")
+
+    # Simulation Banner
+    if SIMULATION_MODE:
+        print(f"{C_CYAN}              [ SIMULATION MODE ACTIVE ]              {C_RESET}")
+
     print(f" Region: {C_BLUE} {REGION} {C_RESET}  |  API Key: ...{RAPIDAPI_KEY[-4:] if len(RAPIDAPI_KEY)>4 else '****'}")
     print("-" * 56)
 
@@ -83,7 +95,12 @@ def render_dashboard(price, stress, status_msg):
 
 def perform_action(action_type):
     # REPLACE THIS WITH YOUR HARDWARE CODE (GPIO, ETC)
-    log_action("HARDWARE", f"Executing {action_type} sequence...")
+    if SIMULATION_MODE:
+        log_action("SIMULATION", f"Would execute {action_type} sequence...")
+    else:
+        # Real Hardware Code Here
+        # e.g. GPIO.output(18, GPIO.HIGH)
+        log_action("HARDWARE", f"Executing {action_type} sequence...")
 
 def check_grid_logic():
     global CURRENT_STATE, LAST_STATE_CHANGE
@@ -108,7 +125,7 @@ def check_grid_logic():
         if (price > PRICE_CAP) or (stress > STRESS_CAP):
             if CURRENT_STATE != "CURTAILED":
                 perform_action('STOP')
-                log_action("STATE", f"Normal -> CURTAILED (P:${price} S:{stress}%)")
+                log_action("STATE", f"Normal -> CURTAILED (P:${price:.2f} S:{stress}%)")
                 CURRENT_STATE = "CURTAILED"
                 LAST_STATE_CHANGE = datetime.datetime.now()
             else:
@@ -122,7 +139,7 @@ def check_grid_logic():
                 status_msg = f"Cooldown Active ({remaining}s)"
             elif CURRENT_STATE != "DISPATCHED":
                 perform_action('DISPATCH')
-                log_action("STATE", f"Normal -> DISPATCHED (Opportunity Price ${price})")
+                log_action("STATE", f"Normal -> DISPATCHED (Opportunity Price ${price:.2f})")
                 CURRENT_STATE = "DISPATCHED"
                 LAST_STATE_CHANGE = datetime.datetime.now()
 
@@ -149,10 +166,7 @@ def check_grid_logic():
         render_dashboard(0, 0, f"EXCEPTION: {str(e)[:20]}")
 
 if __name__ == "__main__":
-    if "YOUR_RAPIDAPI_KEY" in RAPIDAPI_KEY:
-        print("ERROR: Please set GRIDWATCH_API_KEY environment variable.")
-        sys.exit(1)
-
+    validate_config()
     while True:
         check_grid_logic()
         time.sleep(300)
