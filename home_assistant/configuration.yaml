@@ -1,8 +1,12 @@
 # ---------------------------------------------------------
 # GRIDWATCH v2.0 - HOME ASSISTANT CONFIGURATION
 # ---------------------------------------------------------
+# INSTRUCTIONS:
+# 1. Go to HA Settings -> Devices & Services -> Helpers -> Create Helper
+# 2. Create 'Number' helper: Name "GridWatch Price Cap", Entity ID "input_number.gridwatch_price_cap"
+# 3. Create 'Number' helper: Name "GridWatch Stress Cap", Entity ID "input_number.gridwatch_stress_cap"
+# ---------------------------------------------------------
 
-# 1. DATA SENSOR (Raw Feed)
 sensor:
   - platform: rest
     name: "GridWatch Telemetry"
@@ -13,10 +17,11 @@ sensor:
       X-RapidAPI-Key: !secret gridwatch_api_key
       X-RapidAPI-Host: "gridwatch-us-telemetry.p.rapidapi.com"
     params:
-      region: "ERCOT" # Options: PJM, MISO, SPP, NYISO, ISONE, CAISO, ERCOT
-      price_cap: "9999" # Raw data, not a server-side decision
+      region: "ERCOT" # Change to your region
+      # DYNAMIC: Sends your Dashboard Slider values to the API
+      price_cap: "{{ states('input_number.gridwatch_price_cap') | default(0.20) | float * 1000 }}"
+      stress_cap: "{{ states('input_number.gridwatch_stress_cap') | default(90) | int }}"
 
-    # TEMPLATE: Handles Null/None prices gracefully
     value_template: >-
       {% set p = value_json.metrics.price_usd %}
       {% if p is not none %}
@@ -27,58 +32,34 @@ sensor:
 
     unit_of_measurement: "USD/kWh"
     scan_interval: 300 # 5 Minutes
-    json_attributes_path: "$.metrics"
+    json_attributes_path: "$"
     json_attributes:
-      - utilization_pct
-      - load_mw
-      - data_age_mins
+      - metrics
+      - curtail
+      - trigger_reason
 
-# 2. LOGIC ENGINE (Binary Sensors)
+# LOGIC ENGINE (Binary Sensors)
 binary_sensor:
   - platform: template
     sensors:
       # SIGNAL 1: CURTAILMENT (Safety Stop)
-      # Trigger: Price > $0.20/kWh OR Stress > 90%
+      # Logic is now handled by the API based on the params sent above.
+      # If API returns "curtail": true, this sensor turns ON.
       gridwatch_curtail_signal:
         friendly_name: "GridWatch: Curtailment Active"
         value_template: >-
-          {% set price = states('sensor.gridwatch_telemetry') %}
-          {% set stress = state_attr('sensor.gridwatch_telemetry', 'utilization_pct') %}
-
-          {% if price == 'unavailable' %}
-            {{ false }}
-          {% else %}
-            {% set p_kwh = price | float %}
-            {% set s_pct = stress | float(0) %}
-
-            {# THRESHOLDS #}
-            {% if (p_kwh > 0.20) or (s_pct > 90) %}
-              {{ true }}
-            {% else %}
-              {{ false }}
-            {% endif %}
-          {% endif %}
-        # Hysteresis: Must be safe for 15 mins before turning signal OFF
-        delay_off: "00:15:00"
+          {{ value_json.curtail | default(False) }}
+        delay_off: "00:15:00" # Safety Hysteresis
 
       # SIGNAL 2: DISPATCH (Opportunity Start)
-      # Trigger: Price < $0.00/kWh (Negative/Free Power)
+      # Trigger: Price < $0.00 (Negative/Free Power)
       gridwatch_dispatch_signal:
         friendly_name: "GridWatch: Economic Dispatch"
         value_template: >-
           {% set price = states('sensor.gridwatch_telemetry') %}
-
-          {% if price == 'unavailable' %}
-            {{ false }}
+          {% if price != 'unavailable' and price | float(999) <= 0.00 %}
+            {{ true }}
           {% else %}
-            {% set p_kwh = price | float %}
-
-            {# THRESHOLD: Dispatch below $0.00 #}
-            {% if p_kwh <= 0.00 %}
-              {{ true }}
-            {% else %}
-              {{ false }}
-            {% endif %}
+            {{ false }}
           {% endif %}
-        # Hysteresis: Must be cheap for 5 mins before firing
         delay_on: "00:05:00"
